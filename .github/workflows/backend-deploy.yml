@@ -1,0 +1,92 @@
+on:
+  workflow_call:
+    inputs:
+      environment:
+        required: true
+        type: string
+      projectname:
+        required: true
+        type: string
+      ImageURI:
+        required: true
+        type: string
+      IMAGE_TAG:
+        required: true
+        type: string
+
+name: Backend Deploy
+env:
+  AWS_ROLE_TO_ASSUME: ${{ vars.AWS_ROLE_TO_ASSUME }}
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  MICROSERVICE_NAME: ${{ vars.MICROSERVICE_NAME }}
+  AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+  IMAGE_TAG: ${{ github.sha }}
+
+permissions:
+  id-token: write
+  security-events: write
+  contents: read
+  actions: read
+
+jobs:
+  deploy:
+    name: Backend Deploy - ${{ inputs.environment }}
+    environment: ${{ inputs.projectname }}_${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: ./
+    steps:
+      - name: Git clone the repository
+        uses: actions/checkout@v4
+
+      - name: configure aws credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_TO_ASSUME }} #change to reflect your IAM role’s ARN
+          role-session-name: GitHub_to_AWS_via_FederatedOIDC_${{ inputs.environment }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Install ecs-deploy
+        run: |
+
+          set -eux
+          pip install ecs-deploy
+
+      - name: Deploy
+        id: deploy
+        env:
+          AWS_REGION: ${{ env.AWS_REGION }}
+          TARGET_ENV: ${{ inputs.environment }}
+          PROJECT_NAME: ${{ inputs.projectname }}
+          ImageURI: ${{ inputs.ImageURI }}
+          ImageTAG: ${{ inputs.IMAGE_TAG }}
+          MICROSERVICE_NAME: ${{ env.MICROSERVICE_NAME }}
+          ACCOUNT: ${{ env.AWS_ACCOUNT_ID }}
+        run: |
+
+          set -eux
+          cd backend_build
+          ./aws-backend-deploy.sh
+
+      - name: Notify dedicated teams channel
+        uses: jdcargile/ms-teams-notification@v1.4
+        with:
+          github-token: ${{ github.token }} # this will use the runner's token.
+          ms-teams-webhook-uri: ${{ secrets.MS_TEAMS_WEBHOOK_URI }}
+          notification-summary: '[${{ inputs.environment }}] New version deployed successfully by ${{ github.actor }} - ${{ github.event.head_commit.message }} 🚀'
+          notification-color: 28a745
+          timezone: Asia/Ho_Chi_Minh
+          verbose-logging: true
+
+      - name: Notify dedicated teams channel if deployment failed
+        if: failure()
+        uses: jdcargile/ms-teams-notification@v1.4
+        with:
+          github-token: ${{ github.token }} # this will use the runner's token.
+          ms-teams-webhook-uri: ${{ secrets.MS_TEAMS_WEBHOOK_URI }}
+          notification-summary: '[${{ inputs.environment }}] New version is deployed failed by ${{ github.actor }} - ${{ github.event.head_commit.message }} 🚀'
+          notification-color: dc3545
+          timezone: Asia/Ho_Chi_Minh
+          verbose-logging: true

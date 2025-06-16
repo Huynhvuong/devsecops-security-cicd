@@ -1,0 +1,21 @@
+# Python artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+.env/
+
+# Logs and local files
+*.log
+*.sqlite3
+
+# Docker-related
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Terraform configurations (excluded)
+terraform/

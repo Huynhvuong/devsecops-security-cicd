@@ -1,0 +1,35 @@
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - "terraform/**"
+      - ".github/workflows/terraform-*"
+
+  workflow_dispatch:
+    inputs:
+      environment:
+        type: choice
+        description: "Select the environment to deploy to:"
+        required: true
+        options:
+          - dev
+
+      auto_approve:
+        type: boolean
+        description: "Check this to automatically approve changes."
+        required: false
+        default: true
+
+name: Backend build and deploy - Develop
+
+jobs:
+  develop_build:
+    name: Backend build - Develop env
+    uses: ./.github/workflows/backend-build.yml
+    if: ${{ github.ref_name == 'main' || github.event.inputs.environment == 'dev' }}
+    with:
+      environment: dev
+      projectname: vuonghuynh-poc
+    secrets: inherit
+

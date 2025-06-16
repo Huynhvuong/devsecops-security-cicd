@@ -1,0 +1,109 @@
+on:
+  workflow_call:
+    inputs:
+      environment:
+        required: true
+        type: string
+      projectname:
+        required: true
+        type: string
+      auto_approve:
+        type: boolean
+        required: false
+        default: true
+
+name: Backend build, scan and deploy
+env:
+  AWS_ROLE_TO_ASSUME: ${{ vars.AWS_ROLE_TO_ASSUME }}
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+  MICROSERVICE_NAME: ${{ vars.MICROSERVICE_NAME }}
+  IMAGE_TAG: ${{ github.sha }}
+
+permissions:
+  id-token: write
+  security-events: write
+  contents: read
+  actions: read
+
+jobs:
+  unit_tests_and_sonarqube:
+    name: Unit tests and SonarQube analysis - ${{ inputs.environment }}
+    uses: ./.github/workflows/unit-tests-and-sonarqube.yml
+    secrets:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+  build_and_trivy_scan:
+    name: Backend build and scan image - ${{ inputs.environment }}
+    environment: ${{ inputs.projectname }}_${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    outputs:
+      IMAGE_TAG: ${{ env.IMAGE_TAG }}
+      IMAGE_URI: ${{ steps.build-image.outputs.IMAGE_URI }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: ./
+    steps:
+      - name: Git clone the repository
+        uses: actions/checkout@v3
+
+      # Recommended: Use OIDC to configure AWS credentials for all AWS CLI and SDK commands
+      - name: configure aws credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_TO_ASSUME }} #change to reflect your IAM role's ARN
+          role-session-name: GitHub_to_AWS_via_FederatedOIDC_${{ inputs.environment }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        run: |
+          aws ecr get-login-password --region ${{ env.AWS_REGION }} | docker login --username AWS --password-stdin ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com
+
+      - name: Build and Push Image
+        id: build-image
+        run: |
+          set -eux
+
+          #Build microservice image
+          docker buildx create --use
+          docker buildx build --push -t ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ inputs.projectname }}-${{ inputs.environment }}-${{ env.MICROSERVICE_NAME }}:${{ env.IMAGE_TAG}} \
+            -f Dockerfile . \
+            --cache-from type=registry,ref=${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ inputs.projectname }}-${{ inputs.environment }}-${{ env.MICROSERVICE_NAME }}:buildcache \
+            --cache-to mode=max,image-manifest=true,oci-mediatypes=true,type=registry,ref=${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ inputs.projectname }}-${{ inputs.environment }}-${{ env.MICROSERVICE_NAME }}:buildcache
+
+          #Create new env
+          echo "IMAGE_URI=${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ inputs.projectname }}-${{ inputs.environment }}-${{ env.MICROSERVICE_NAME }}:${{ env.IMAGE_TAG}}"  >> "$GITHUB_OUTPUT"
+
+      - name: Run Trivy vulnerability scan
+        id: trivy-scan-image
+        uses: aquasecurity/trivy-action@0.30.0
+        with:
+          image-ref: '${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ inputs.projectname }}-${{ inputs.environment }}-${{ env.MICROSERVICE_NAME }}:${{ env.IMAGE_TAG}}'
+          format: 'sarif'
+          exit-code: '1'
+          ignore-unfixed: true
+          severity: 'CRITICAL,HIGH'
+          output: 'trivy-results.sarif'
+
+      - name: Upload Trivy scan results to GitHub Security tab
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: 'trivy-results.sarif'
+          category: 'Trivy Container Scan'
+          wait-for-processing: true
+
+  deploy:
+    needs:
+      - build_and_trivy_scan
+      - unit_tests_and_sonarqube
+    name: Backend deploy - ${{ inputs.environment }} env
+    uses: ./.github/workflows/backend-deploy.yml
+    with:
+      environment: ${{ inputs.environment }}
+      projectname: ${{ inputs.projectname }}
+      ImageURI: ${{ needs.build_and_trivy_scan.outputs.IMAGE_URI }} 
+      IMAGE_TAG: ${{ needs.build_and_trivy_scan.outputs.IMAGE_TAG }}
+    secrets: inherit

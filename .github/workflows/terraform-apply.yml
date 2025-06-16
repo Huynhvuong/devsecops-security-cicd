@@ -1,0 +1,113 @@
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "terraform/**"
+      - ".github/workflows/terraform-*"
+
+name: Terraform Apply
+env:
+  AWS_ROLE_TO_ASSUME: ${{ vars.AWS_ROLE_TO_ASSUME }}
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  TERRAFORM_VERSION: ${{ vars.TERRAFORM_VERSION }}
+  GIT_ACCESS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  TF_VAR_EXTERNAL_ID: ${{ secrets.ENV_TF_VAR_EXTERNAL_ID }}
+  ENVIRONMENT: "dev"
+  PROJECT_NAME: "vuonghuynh_poc"
+
+permissions:
+  id-token: write # This is required for requesting the JWT
+  contents: read # This is required for actions/checkout
+  pull-requests: write
+  actions: read
+
+jobs:
+  apply:
+    name: Apply Terraform - Dev
+    environment: vuonghuynh-poc_dev
+    runs-on: ubuntu-latest
+    outputs:
+      PR_NUMBER: ${{ steps.init.outputs.pr_number }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: ./terraform
+    steps:
+      - name: Git clone the repository
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: configure aws credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_TO_ASSUME }} #change to reflect your IAM role’s ARN
+          role-session-name: GitHub_to_AWS_via_FederatedOIDC_${{ env.ENVIRONMENT }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Add profile credentials to ~/.aws/credentials
+        run: |
+          #create aws main profile
+          aws configure set aws_access_key_id ${{ env.AWS_ACCESS_KEY_ID }} --profile vuonghuynh-poc-dev
+          aws configure set aws_secret_access_key ${{ env.AWS_SECRET_ACCESS_KEY }} --profile vuonghuynh-poc-dev
+          aws configure set aws_session_token ${{ env.AWS_SESSION_TOKEN }} --profile vuonghuynh-poc-dev
+
+      - name: Sts GetCallerIdentity and Git config global
+        run: |
+          aws sts get-caller-identity
+          git config --global url."https://oauth2:${{ env.GIT_ACCESS_TOKEN }}@github.com".insteadOf "ssh://git@github.com"
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      - name: Terraform Init
+        id: init
+        run: |
+          set -eux
+          # Get latest PR number
+          PR_NUMBER=$(git log --grep='#[0-9]\+' --format=%s | grep -oE '#[0-9]+' | cut -c 2- | head -n 1)
+          echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+          # Start terraform init
+          ./config/${{ env.ENVIRONMENT }}/terraform_init_${{ env.PROJECT_NAME }}_${{ env.ENVIRONMENT }}.sh
+
+      - name: Download artifact
+        id: download
+        uses: dawidd6/action-download-artifact@v2
+        with:
+          github_token: ${{env.GIT_ACCESS_TOKEN}}
+          workflow: terraform-plan.yml
+          pr: ${{ steps.init.outputs.pr_number }}
+          name_is_regexp: true
+          name: output_plan_${{ env.ENVIRONMENT }}
+          if_no_artifact_found: fail
+          path: ${{ github.workspace }}/terraform/
+
+      - name: Terraform apply
+        id: apply
+        run: |
+          terraform workspace select ${{ env.ENVIRONMENT }}
+          terraform apply ./output_plan_${{ env.ENVIRONMENT }}/${{ env.ENVIRONMENT }}.tfplan
+
+      - name: Notify dedicated teams channel
+        uses: jdcargile/ms-teams-notification@v1.4
+        with:
+          github-token: ${{ github.token }} # this will use the runner's token.
+          ms-teams-webhook-uri: ${{ secrets.MS_TEAMS_WEBHOOK_URI }}
+          notification-summary: '[${{ env.ENVIRONMENT }}] New Infra deployed successfully by ${{ github.actor }} - ${{ github.event.head_commit.message }} 🚀'
+          notification-color: 28a745
+          timezone: Asia/Ho_Chi_Minh
+          verbose-logging: true
+  
+      - name: Notify dedicated teams channel if deployment failed
+        if: failure()
+        uses: jdcargile/ms-teams-notification@v1.4
+        with:
+          github-token: ${{ github.token }} # this will use the runner's token.
+          ms-teams-webhook-uri: ${{ secrets.MS_TEAMS_WEBHOOK_URI }}
+          notification-summary: '[${{ env.ENVIRONMENT }}] New Infra is deployed failed by ${{ github.actor }} - ${{ github.event.head_commit.message }} 🚀'
+          notification-color: dc3545
+          timezone: Asia/Ho_Chi_Minh
+          verbose-logging: true

@@ -1,0 +1,68 @@
+name: Unit Tests and SonarQube Analysis
+
+on:
+  pull_request:
+    branches:
+      - main
+  workflow_call:
+    secrets:
+      SONAR_TOKEN:
+        required: true
+permissions:
+  # only required for workflows in private repositories
+  actions: read
+  contents: read
+
+jobs:
+  unit_tests_and_sonarqube:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+
+    - name: Install Poetry
+      run: |
+        curl -sSL https://install.python-poetry.org | python3 -
+        echo "$HOME/.local/bin" >> $GITHUB_PATH
+        
+    - name: Load cached venv
+      id: cached-poetry-dependencies
+      uses: actions/cache@v3
+      with:
+        path: .venv
+        key: venv-${{ runner.os }}-${{ hashFiles('**/poetry.lock') }}
+        
+    - name: Install dependencies
+      if: steps.cached-poetry-dependencies.outputs.cache-hit != 'true'
+      run: poetry install --no-interaction --no-root
+      
+    - name: Run tests
+      run: poetry run pytest -s --cov=main --cov-report=xml
+      continue-on-error: false
+
+    - name: List files for debug
+      run: | 
+        ls -al
+
+    - name: SonarCloud Scan
+      uses: SonarSource/sonarqube-scan-action@v5
+      with:
+        projectBaseDir: .
+      env:
+        SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    # Check the Quality Gate status.
+    - name: SonarQube Quality Gate check
+      id: sonarqube-quality-gate-check
+      uses: sonarsource/sonarqube-quality-gate-action@master
+      with:
+        pollingTimeoutSec: 300
+      env:
+        SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

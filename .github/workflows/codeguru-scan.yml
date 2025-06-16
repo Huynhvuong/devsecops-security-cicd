@@ -1,0 +1,61 @@
+name: CodeGuru Security Scan
+
+on:
+  # push:
+  #   branches: [ main, dev ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  AWS_ROLE_TO_ASSUME: ${{ vars.AWS_CODEGURU_ROLE_TO_ASSUME }}
+  AWS_REGION: ${{ vars.AWS_CODEGURU_REGION }}
+  AWS_ACCOUNT_ID: ${{ vars.AWS_CODEGURU_ACCOUNT_ID }}
+  GIT_ACCESS_TOKEN: ${{ secrets.GIT_ACCESS_TOKEN }}
+  ENVIRONMENT: "dev"
+
+permissions:
+  id-token: write # for writing security events.
+  security-events: write
+  # only required for workflows in private repositories
+  actions: read
+  contents: read
+
+jobs:
+  codeguru_scan:
+    runs-on: ubuntu-latest
+    environment: vuonghuynh-poc_dev
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: configure aws credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_TO_ASSUME }} #change to reflect your IAM role's ARN
+          role-session-name: GitHub_to_Codeguru_via_FederatedOIDC_${{ env.ENVIRONMENT }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: CodeGuru Security
+        uses: aws-actions/codeguru-security@v1
+        with:
+          source_path: .
+          aws_region: ${{ env.AWS_REGION }}
+          fail_on_severity: High
+
+      - name: Upload CodeGuru scan results to GitHub Security tab
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: codeguru-security-results.sarif.json
+          category: 'CodeGuru Security Scan'
+          wait-for-processing: true
+
+      # Temporarily
+      - name: Upload CodeGuru scan results as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: codeguru-security-results
+          path: codeguru-security-results.sarif.json

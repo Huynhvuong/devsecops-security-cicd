@@ -1,0 +1,173 @@
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches:
+      - main
+    paths:
+      - "terraform/**"
+      - ".github/workflows/terraform-*"
+
+name: Terraform Plan
+env:
+  AWS_ROLE_TO_ASSUME: ${{ vars.AWS_ROLE_TO_ASSUME}}
+  AWS_REGION:  ${{ vars.AWS_REGION }}
+  TERRAFORM_VERSION: ${{ vars.TERRAFORM_VERSION }}
+  GIT_ACCESS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  issue_number: ${{ github.event.pull_request.number }}
+  TF_VAR_EXTERNAL_ID: ${{ secrets.ENV_TF_VAR_EXTERNAL_ID }}
+  ENVIRONMENT: "dev"
+  PROJECT_NAME: "vuonghuynh_poc"
+
+permissions:
+  id-token: write # This is required for requesting the JWT
+  contents: read # This is required for actions/checkout
+  pull-requests: write
+
+jobs:
+  plan:
+    name: Planning Terraform - Dev
+    environment: vuonghuynh-poc_dev
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: ./terraform
+    steps:
+      - name: Git clone the repository
+        uses: actions/checkout@v3
+
+      - name: configure aws credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_TO_ASSUME }} #change to reflect your IAM role’s ARN
+          role-session-name: GitHub_to_AWS_via_FederatedOIDC_${{ env.ENVIRONMENT }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Add profile credentials to ~/.aws/credentials
+        run: |
+          #create aws main profile
+          aws configure set aws_access_key_id ${{ env.AWS_ACCESS_KEY_ID }} --profile vuonghuynh-poc-dev
+          aws configure set aws_secret_access_key ${{ env.AWS_SECRET_ACCESS_KEY }} --profile vuonghuynh-poc-dev
+          aws configure set aws_session_token ${{ env.AWS_SESSION_TOKEN }} --profile vuonghuynh-poc-dev
+
+      - name: Sts GetCallerIdentity and Git config global
+        run: |
+          aws sts get-caller-identity
+          git config --global url."https://oauth2:${{ env.GIT_ACCESS_TOKEN }}@github.com".insteadOf "ssh://git@github.com"
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      - name: Terraform Init
+        id: init
+        run: |
+          ./config/${{ env.ENVIRONMENT }}/terraform_init_${{ env.PROJECT_NAME }}_${{ env.ENVIRONMENT }}.sh
+
+      - name: Terraform Plan
+        id: plan
+        if: github.event_name == 'pull_request'
+        run: |
+          terraform workspace select ${{ env.ENVIRONMENT }}
+          terraform plan --var-file=./config/${{ env.ENVIRONMENT }}/${{ env.ENVIRONMENT }}.tfvars -no-color -lock=false -out ${{ env.ENVIRONMENT }}.tfplan
+        continue-on-error: true
+
+      - name: Check Plan Output Size
+        id: check-plan
+        run: |
+          plan=$(cat <<'EOF'
+          ${{ format('{0}{1}', steps.plan.outputs.stdout, steps.plan.outputs.stderr) }}
+          EOF
+          )
+          plan=$(printf "%s\n" "$plan" | sed 's/\${/{/g')
+          argmax=$(getconf ARG_MAX)
+          plansize=$(echo $plan | wc -c | xargs)
+          echo "Plan size: $plansize"
+          echo "ARGMAX: $argmax"
+          if [[ $plansize -gt $argmax ]]; then
+            message="Sorry! Plan output is too large! Please check the result at https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo "PLAN=$message" >> $GITHUB_ENV
+          else
+            echo "PLAN<<EOF" >> $GITHUB_ENV
+            echo "${plan:0:65536}" >> $GITHUB_ENV
+            echo "EOF" >> $GITHUB_ENV
+          fi
+
+      - name: Post Terraform Plan Result
+        uses: actions/github-script@v7
+        if: github.event_name == 'pull_request'
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const projectId = `VH-POC`;
+            const re = new RegExp(projectId, 'g')
+
+            const planOutput = `
+            #### 📖 Terraform Plan Result for \`${projectId}\`: \`${{ steps.plan.outcome }}\`
+
+            <details><summary>Show Plan</summary>
+
+            \`\`\`
+            ${{ env.PLAN }}
+            \`\`\`
+
+            </details>
+
+            This plan result will be updated when the \`Terraform Plan\` workflow re-run.`;
+
+            // Get the existing comments.
+            const {data: comments} = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.number,
+            });
+
+            // Find any comment already made by the bot.
+            // Find any comment already made by the bot.
+            const botComments = comments.filter(comment => comment.user.id === 41898282);
+            let isUpdated = false;
+            for (botComment of botComments) {
+              if (re.test(botComment.body)) {
+                await github.rest.issues.updateComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  comment_id: botComment.id,
+                  body: planOutput
+                });
+                isUpdated = true;
+              }
+            }
+            if (!isUpdated) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.payload.number,
+                body: planOutput
+              })
+            };
+
+      - name: Upload Plan output
+        uses: actions/upload-artifact@v4
+        with:
+          name: output_plan_${{ env.ENVIRONMENT }}
+          path: ${{ github.workspace }}/terraform/${{ env.ENVIRONMENT }}.tfplan
+          retention-days: 20
+
+      - name: Terraform Plan Status
+        if: steps.plan.outcome == 'failure'
+        run: exit 1
+
+  cleanup_deployment:
+    needs: plan
+    runs-on: ubuntu-latest
+    permissions: write-all
+    steps:
+      - uses: actions/checkout@v3
+      - name: 🗑 Delete deployment environment
+        uses: strumwolf/delete-deployment-environment@v2.2.3
+        with:
+          token: ${{ env.GIT_ACCESS_TOKEN }}
+          environment: vuonghuynh-poc_${{ env.ENVIRONMENT }}
+          ref: ${{ github.head_ref }}
+          onlyRemoveDeployments: true
