@@ -1,0 +1,63 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Cloudformation stack for creating Role to be assumed by Terraform
+Parameters:
+  ProjectName:
+    Description: Name of the Project
+    Type: String
+    Default: vuonghuynh-poc
+  VuongIAMUser:
+    Description: AWS IAM user to assume the TerraformDeployRole
+    Type: String
+  ExternalId:
+    Description: ExternalId of the TerraformDeployRole
+    Type: String
+Resources:
+  TerraformDeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-terraform-deploy-role
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS:
+                - !Ref VuongIAMUser
+            Action:
+              - sts:AssumeRole
+            Condition:
+              StringEquals:
+                "sts:ExternalId": !Ref ExternalId
+      Path: /
+  TerraformDeployRolePolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub ${ProjectName}-terraform-deploy-policy
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - acm:*
+              - application-autoscaling:*
+              - cloudformation:*
+              - cloudfront:*
+              - cloudwatch:*
+              - ec2:*
+              - ecr:*
+              - ecs:*
+              - elasticloadbalancing:*
+              - events:*
+              - dynamodb:*
+              - iam:*
+              - kms:*
+              - logs:*
+              - route53:*
+              - s3:*
+              - secretsmanager:*
+              - sns:*
+              - ssm:*
+              - autoscaling:*
+            Resource: "*"
+      Roles:
+        - !Ref TerraformDeployRole
